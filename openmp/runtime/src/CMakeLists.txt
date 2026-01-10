@@ -91,6 +91,7 @@ else()
     kmp_global.cpp
     kmp_i18n.cpp
     kmp_io.cpp
+    kmp_resource_manager.cpp
     kmp_runtime.cpp
     kmp_settings.cpp
     kmp_str.cpp

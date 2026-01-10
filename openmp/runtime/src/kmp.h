@@ -4026,6 +4026,7 @@ extern void __kmp_suspend_initialize(void);
 extern void __kmp_suspend_initialize_thread(kmp_info_t *th);
 extern void __kmp_suspend_uninitialize_thread(kmp_info_t *th);
 
+extern int __kmp_determine_teamsize();
 extern kmp_info_t *__kmp_allocate_thread(kmp_root_t *root, kmp_team_t *team,
                                          int tid);
 extern kmp_team_t *__kmp_allocate_team(kmp_root_t *root, int new_nproc,

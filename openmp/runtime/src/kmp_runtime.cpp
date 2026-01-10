@@ -25,6 +25,7 @@
 #include "kmp_wrapper_getpid.h"
 #include "kmp_dispatch.h"
 #include "kmp_utils.h"
+#include <cstdio>
 #if KMP_USE_HIER_SCHED
 #include "kmp_dispatch_hier.h"
 #endif
@@ -590,9 +591,7 @@ static void __kmp_fini_allocator() {
 /* ------------------------------------------------------------------------ */
 
 #if ENABLE_LIBOMPTARGET
-static void __kmp_init_omptarget() {
-  __kmp_init_target_task();
-}
+static void __kmp_init_omptarget() { __kmp_init_target_task(); }
 #endif
 
 /* ------------------------------------------------------------------------ */
@@ -1017,6 +1016,7 @@ static void __kmp_fork_team_threads(kmp_root_t *root, kmp_team_t *team,
     team->t.t_threads[0] = master_th;
     __kmp_initialize_info(master_th, team, 0, master_gtid);
 
+    // printf("Find Team of size %d\n", team->t.t_nproc);
     /* now, install the worker threads */
     for (i = 1; i < team->t.t_nproc; i++) {
 
@@ -1546,7 +1546,7 @@ __kmp_fork_in_teams(ident_t *loc, int gtid, kmp_team_t *parent_team,
                              ,
                              exit_frame_p
 #endif
-                             );
+      );
     }
 
 #if OMPT_SUPPORT
@@ -1742,7 +1742,7 @@ __kmp_serial_fork_call(ident_t *loc, int gtid, enum fork_context_e call_context,
     if (!ap) {
       // revert change made in __kmpc_serialized_parallel()
       master_th->th.th_serial_team->t.t_level--;
-// Get args from parent team for teams construct
+      // Get args from parent team for teams construct
 
 #if OMPT_SUPPORT
       void *dummy;
@@ -1781,7 +1781,7 @@ __kmp_serial_fork_call(ident_t *loc, int gtid, enum fork_context_e call_context,
                                ,
                                exit_frame_p
 #endif
-                               );
+        );
       }
 
 #if OMPT_SUPPORT
@@ -1880,7 +1880,7 @@ __kmp_serial_fork_call(ident_t *loc, int gtid, enum fork_context_e call_context,
                                ,
                                exit_frame_p
 #endif
-                               );
+        );
       }
 
 #if OMPT_SUPPORT
@@ -2073,6 +2073,15 @@ int __kmp_fork_call(ident_t *loc, int gtid,
       nthreads = task_thread_limit > 0 && task_thread_limit < nthreads
                      ? task_thread_limit
                      : nthreads;
+
+      bool dynamic_enabled = master_th->th.th_current_task->td_icvs.dynamic;
+      if (dynamic_enabled) {
+        int new_size = __kmp_determine_teamsize();
+        if (new_size > 0 && new_size < nthreads) {
+          nthreads = new_size;
+        }
+      }
+      
       // Check if we need to take forkjoin lock? (no need for serialized
       // parallel out of teams construct).
       if (nthreads > 1) {
@@ -3296,29 +3305,29 @@ static kmp_internal_control_t __kmp_get_global_icvs(void) {
   KMP_DEBUG_ASSERT(__kmp_nested_proc_bind.used > 0);
 
   kmp_internal_control_t g_icvs = {
-    0, // int serial_nesting_level; //corresponds to value of th_team_serialized
-    (kmp_int8)__kmp_global.g.g_dynamic, // internal control for dynamic
-    // adjustment of threads (per thread)
-    (kmp_int8)__kmp_env_blocktime, // int bt_set; //internal control for
-    // whether blocktime is explicitly set
-    __kmp_dflt_blocktime, // int blocktime; //internal control for blocktime
+      0, // int serial_nesting_level; //corresponds to value of
+         // th_team_serialized
+      (kmp_int8)__kmp_global.g.g_dynamic, // internal control for dynamic
+      // adjustment of threads (per thread)
+      (kmp_int8)__kmp_env_blocktime, // int bt_set; //internal control for
+      // whether blocktime is explicitly set
+      __kmp_dflt_blocktime, // int blocktime; //internal control for blocktime
 #if KMP_USE_MONITOR
-    __kmp_bt_intervals, // int bt_intervals; //internal control for blocktime
+      __kmp_bt_intervals, // int bt_intervals; //internal control for blocktime
 // intervals
 #endif
-    __kmp_dflt_team_nth, // int nproc; //internal control for # of threads for
-    // next parallel region (per thread)
-    // (use a max ub on value if __kmp_parallel_initialize not called yet)
-    __kmp_cg_max_nth, // int thread_limit;
-    __kmp_task_max_nth, // int task_thread_limit; // to set the thread_limit
-    // on task. This is used in the case of target thread_limit
-    __kmp_dflt_max_active_levels, // int max_active_levels; //internal control
-    // for max_active_levels
-    r_sched, // kmp_r_sched_t sched; //internal control for runtime schedule
-    // {sched,chunk} pair
-    __kmp_nested_proc_bind.bind_types[0],
-    __kmp_default_device,
-    NULL // struct kmp_internal_control *next;
+      __kmp_dflt_team_nth, // int nproc; //internal control for # of threads for
+      // next parallel region (per thread)
+      // (use a max ub on value if __kmp_parallel_initialize not called yet)
+      __kmp_cg_max_nth, // int thread_limit;
+      __kmp_task_max_nth, // int task_thread_limit; // to set the thread_limit
+      // on task. This is used in the case of target thread_limit
+      __kmp_dflt_max_active_levels, // int max_active_levels; //internal control
+      // for max_active_levels
+      r_sched, // kmp_r_sched_t sched; //internal control for runtime schedule
+      // {sched,chunk} pair
+      __kmp_nested_proc_bind.bind_types[0], __kmp_default_device,
+      NULL // struct kmp_internal_control *next;
   };
 
   return g_icvs;
@@ -4413,7 +4422,7 @@ kmp_info_t *__kmp_allocate_thread(kmp_root_t *root, kmp_team_t *team,
   kmp_team_t *serial_team;
   kmp_info_t *new_thr;
   int new_gtid;
-
+  // printf("Allocate Thread %d\n", __kmp_get_gtid());
   KA_TRACE(20, ("__kmp_allocate_thread: T#%d\n", __kmp_get_gtid()));
   KMP_DEBUG_ASSERT(root && team);
   KMP_MB();
@@ -5365,6 +5374,7 @@ kmp_team_t *__kmp_allocate_team(kmp_root_t *root, int new_nproc, int max_nproc,
         kmp_affinity_raii_t new_temp_affinity{__kmp_affin_fullMask};
 #endif
 
+        //        printf("Allocate Team of size %d\n", new_nproc);
         /* allocate new threads for the hot team */
         for (f = team->t.t_nproc; f < new_nproc; f++) {
           kmp_info_t *new_worker = __kmp_allocate_thread(root, team, f);
@@ -5975,6 +5985,9 @@ void *__kmp_launch_thread(kmp_info_t *this_thr) {
 #endif
 
   int gtid = this_thr->th.th_info.ds.ds_gtid;
+  // printf("Thread launched: gtid=%d, tid=%d\n",gtid,
+  // this_thr->th.th_info.ds.ds_tid);
+
   /*    void                 *stack_data;*/
   kmp_team_t **volatile pteam;
 

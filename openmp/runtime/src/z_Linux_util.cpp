@@ -539,6 +539,10 @@ static void *__kmp_launch_worker(void *thr) {
 
   gtid = ((kmp_info_t *)thr)->th.th_info.ds.ds_gtid;
   __kmp_gtid_set_specific(gtid);
+  
+  printf("Worker launched: gtid=%d, tid=%d\n",
+       gtid, ((kmp_info_t *)thr)->th.th_info.ds.ds_tid);
+
 #ifdef KMP_TDATA_GTID
   __kmp_gtid = gtid;
 #endif
