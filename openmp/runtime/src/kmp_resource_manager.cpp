@@ -131,10 +131,7 @@ extern int __kmp_determine_teamsize() {
   KA_TRACE(10, ("__kmp_determine_teamsize: returning %d\n", value));
   return value; */
   KA_TRACE(10, ("__kmp_determine_teamsize: called\n"));
-  printf("__kmp_determine_teamsize: called\n");
-
   int value = rm_get_granted_threads(2, 16);
-  printf("__kmp_determine_teamsize: granted %d threads\n", value);
   KA_TRACE(10, ("__kmp_determine_teamsize: returning %d\n", value));
 
   return value;
