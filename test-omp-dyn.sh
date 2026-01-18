@@ -5,14 +5,12 @@ export OMP_PROC_BIND=spread
 export OMP_DISPLAY_AFFINITY=1
 export OMP_DYNAMIC=true
 
-export KMP_A_DEBUG=20
-export KMP_F_DEBUG=20
-export KMP_DEBUG=1
-export KMP_SETTINGS=1
-export KMP_AFFINITY=verbose
+#export KMP_A_DEBUG=20
+#export KMP_F_DEBUG=20
+#export KMP_DEBUG=1
+#export KMP_SETTINGS=1
+#export KMP_AFFINITY=verbose
 
-#export TCM_ENABLE=1
-#export TCM_VERSION=1
 #cmake -S llvm -B build -G Ninja  -DLLVM_ENABLE_PROJECTS="clang;openmp"
 ninja -C build -j 4
 
@@ -33,4 +31,5 @@ else
   ./build/bin/clang -fopenmp   -I./build/projects/openmp/runtime/src   omp_dyn.c -o omp   -Wl,-rpath,./build/lib
 fi
 
+./omp &
 ./omp 2>&1 | tee omp_debug_dyn.log
