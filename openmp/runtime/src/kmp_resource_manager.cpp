@@ -30,11 +30,23 @@ bool set_nonblocking(int fd) {
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+bool set_cloexec(int fd) {
+  int flags = fcntl(fd, F_GETFD, 0);
+  if (flags < 0) return false;
+  return fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0;
+}
+
+
 bool connect_once() {
   if (rm_fd != -1) return true;
 
   rm_fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (rm_fd < 0) return false;
+  if (!set_cloexec(rm_fd)) {
+    close(rm_fd);
+    rm_fd = -1;
+    return false;
+  }
 
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
@@ -42,6 +54,11 @@ bool connect_once() {
   std::strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
   if (connect(rm_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    close(rm_fd);
+    rm_fd = -1;
+    return false;
+  }
+  if (!set_nonblocking(rm_fd)) {
     close(rm_fd);
     rm_fd = -1;
     return false;
@@ -85,19 +102,39 @@ int rm_get_granted_threads(int fallback, int max_threads) {
   std::memcpy(req + 8,  &flags, 4);
   std::memcpy(req + 12, &s, 4);
 
-  if (write(rm_fd, req, sizeof(req)) != sizeof(req)) {
-    close(rm_fd); rm_fd = -1;
-    return fallback;
+  size_t wrote = 0;
+  while (wrote < sizeof(req)) {
+    const ssize_t w = write(rm_fd, req + wrote, sizeof(req) - wrote);
+    if (w < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return fallback;
+      }
+      close(rm_fd); rm_fd = -1;
+      return fallback;
+    }
+    if (w == 0) {
+      close(rm_fd); rm_fd = -1;
+      return fallback;
+    }
+    wrote += static_cast<size_t>(w);
   }
 
   uint8_t rep[8];
-  const ssize_t r = read(rm_fd, rep, sizeof(rep));
-  if (r != sizeof(rep)) {
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+  size_t read_bytes = 0;
+  while (read_bytes < sizeof(rep)) {
+    const ssize_t r = read(rm_fd, rep + read_bytes, sizeof(rep) - read_bytes);
+    if (r < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return fallback;
+      }
+      close(rm_fd); rm_fd = -1;
       return fallback;
     }
-    close(rm_fd); rm_fd = -1;
-    return fallback;
+    if (r == 0) {
+      close(rm_fd); rm_fd = -1;
+      return fallback;
+    }
+    read_bytes += static_cast<size_t>(r);
   }
 
   uint16_t granted, ttl_ms;
