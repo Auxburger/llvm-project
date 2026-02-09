@@ -8,15 +8,20 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <errno.h>
 
 namespace {
 
-int rm_fd = -1;
-int cached_threads = 0;
-uint64_t cache_until_ns = 0;
-uint32_t seq = 1;
+struct ThreadState {
+  int fd = -1;
+  int cached_threads = 0;
+  uint64_t cache_until_ns = 0;
+  uint32_t seq = 1;
+};
+
+thread_local ThreadState ts;
 
 uint64_t now_ns() {
   timespec ts{};
@@ -36,15 +41,29 @@ bool set_cloexec(int fd) {
   return fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0;
 }
 
+bool wait_fd(int fd, short events, int timeout_ms) {
+  pollfd pfd{};
+  pfd.fd = fd;
+  pfd.events = events;
+  for (;;) {
+    int r = poll(&pfd, 1, timeout_ms);
+    if (r > 0) return true;
+    if (r == 0) return false;
+    if (errno == EINTR) continue;
+    return false;
+  }
+}
+
+
 
 bool connect_once() {
-  if (rm_fd != -1) return true;
+  if (ts.fd != -1) return true;
 
-  rm_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (rm_fd < 0) return false;
-  if (!set_cloexec(rm_fd)) {
-    close(rm_fd);
-    rm_fd = -1;
+  ts.fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (ts.fd < 0) return false;
+  if (!set_cloexec(ts.fd)) {
+    close(ts.fd);
+    ts.fd = -1;
     return false;
   }
 
@@ -53,14 +72,14 @@ bool connect_once() {
   const char* path = "/tmp/omp-rm.sock";
   std::strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
-  if (connect(rm_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    close(rm_fd);
-    rm_fd = -1;
+  if (connect(ts.fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    close(ts.fd);
+    ts.fd = -1;
     return false;
   }
-  if (!set_nonblocking(rm_fd)) {
-    close(rm_fd);
-    rm_fd = -1;
+  if (!set_nonblocking(ts.fd)) {
+    close(ts.fd);
+    ts.fd = -1;
     return false;
   }
   return true;
@@ -80,21 +99,21 @@ int rm_get_granted_threads(int fallback, int max_threads) {
   max_threads = clamp(max_threads, 1, max_threads);
 
   const uint64_t t = now_ns();
-  if (cached_threads > 0 && t < cache_until_ns) {
-    return clamp(cached_threads, 1, max_threads);
+  if (ts.cached_threads > 0 && t < ts.cache_until_ns) {
+    return clamp(ts.cached_threads, 1, max_threads);
   }
 
   if (!connect_once()) {
     return fallback;
   }
 
-  // Request: pid(u32), max(u16), hint(u16), flags(u32), seq(u32)
+  // Request: pid(u32), max(u16), hint(u16), flags(u32), ts.seq(u32)
   uint8_t req[16];
   uint32_t pid = static_cast<uint32_t>(getpid());
   uint16_t maxu = static_cast<uint16_t>(clamp(max_threads, 1, 65535));
   uint16_t hint = static_cast<uint16_t>(clamp(fallback, 1, 65535));
   uint32_t flags = 0;
-  uint32_t s = seq++;
+  uint32_t s = ts.seq++;
 
   std::memcpy(req + 0,  &pid, 4);
   std::memcpy(req + 4,  &maxu, 2);
@@ -102,18 +121,23 @@ int rm_get_granted_threads(int fallback, int max_threads) {
   std::memcpy(req + 8,  &flags, 4);
   std::memcpy(req + 12, &s, 4);
 
+  const int timeout_ms = 2;
+
   size_t wrote = 0;
   while (wrote < sizeof(req)) {
-    const ssize_t w = write(rm_fd, req + wrote, sizeof(req) - wrote);
+    const ssize_t w = write(ts.fd, req + wrote, sizeof(req) - wrote);
     if (w < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return fallback;
+        if (!wait_fd(ts.fd, POLLOUT, timeout_ms)) {
+          return fallback;
+        }
+        continue;
       }
-      close(rm_fd); rm_fd = -1;
+      close(ts.fd); ts.fd = -1;
       return fallback;
     }
     if (w == 0) {
-      close(rm_fd); rm_fd = -1;
+      close(ts.fd); ts.fd = -1;
       return fallback;
     }
     wrote += static_cast<size_t>(w);
@@ -122,16 +146,19 @@ int rm_get_granted_threads(int fallback, int max_threads) {
   uint8_t rep[8];
   size_t read_bytes = 0;
   while (read_bytes < sizeof(rep)) {
-    const ssize_t r = read(rm_fd, rep + read_bytes, sizeof(rep) - read_bytes);
+    const ssize_t r = read(ts.fd, rep + read_bytes, sizeof(rep) - read_bytes);
     if (r < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return fallback;
+        if (!wait_fd(ts.fd, POLLIN, timeout_ms)) {
+          return fallback;
+        }
+        continue;
       }
-      close(rm_fd); rm_fd = -1;
+      close(ts.fd); ts.fd = -1;
       return fallback;
     }
     if (r == 0) {
-      close(rm_fd); rm_fd = -1;
+      close(ts.fd); ts.fd = -1;
       return fallback;
     }
     read_bytes += static_cast<size_t>(r);
@@ -145,9 +172,9 @@ int rm_get_granted_threads(int fallback, int max_threads) {
   (void)epoch;
 
   int g = granted > 0 ? granted : 1;
-  cached_threads = g;
+  ts.cached_threads = g;
   if (ttl_ms == 0) ttl_ms = 5;
-  cache_until_ns = t + uint64_t(ttl_ms) * 1'000'000ull;
+  ts.cache_until_ns = t + uint64_t(ttl_ms) * 1'000'000ull;
 
   return clamp(g, 1, max_threads);
 }
