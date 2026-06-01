@@ -6,6 +6,7 @@
 #include <cstring>
 #include <ctime>
 #include <unistd.h>
+#include <sched.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <poll.h>
@@ -14,13 +15,23 @@
 
 namespace {
 
+// Reply layout (12 bytes):
+//   0-1:  granted  (u16)
+//   2-3:  ttl_ms   (u16)
+//   4-7:  epoch    (u32)
+//   8-9:  base_cpu (u16)  — first CPU of assigned range; 0 if no pinning
+//  10-11: num_cpus (u16)  — number of consecutive CPUs; 0 if no pinning
+static constexpr size_t REPLY_SIZE = 12;
+
 struct ThreadState {
   int fd = -1;
   int cached_threads = 0;
+  uint16_t cached_base_cpu = 0;
+  uint16_t cached_num_cpus = 0;
   uint64_t cache_until_ns = 0;
   uint32_t seq = 1;
   bool pending_reply = false; // a request is in flight, reply not yet consumed
-  uint8_t rep_buf[8] = {};    // partial reply accumulator
+  uint8_t rep_buf[REPLY_SIZE] = {};
   size_t rep_read = 0;        // bytes read into rep_buf so far
 };
 
@@ -76,12 +87,27 @@ int clamp(int v, int lo, int hi) {
   return v;
 }
 
+// Restrict the calling thread's CPU affinity to [base_cpu, base_cpu + num_cpus).
+// New OpenMP worker threads created afterwards inherit this affinity, so the
+// entire team is confined to the DRM-assigned CPU slice without any additional
+// per-thread calls.
+static void apply_cpu_affinity(uint16_t base_cpu, uint16_t num_cpus) {
+  if (num_cpus == 0) return;
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (uint16_t i = 0; i < num_cpus; ++i) {
+    CPU_SET(static_cast<int>(base_cpu) + i, &set);
+  }
+  // pid=0 → current thread; new threads inherit this mask at creation time.
+  sched_setaffinity(0, sizeof(set), &set);
+}
+
 // Non-blocking: consume bytes from the socket into rep_buf.
 // Returns true if a complete reply was received and the cache was updated.
 bool try_drain_reply() {
-  while (ts.rep_read < sizeof(ts.rep_buf)) {
+  while (ts.rep_read < REPLY_SIZE) {
     ssize_t r = read(ts.fd, ts.rep_buf + ts.rep_read,
-                     sizeof(ts.rep_buf) - ts.rep_read);
+                     REPLY_SIZE - ts.rep_read);
     if (r > 0) {
       ts.rep_read += static_cast<size_t>(r);
     } else if (r == 0) {
@@ -100,19 +126,28 @@ bool try_drain_reply() {
     }
   }
 
-  // Full 8-byte reply received — update cache
-  uint16_t granted, ttl_ms;
+  // Full reply received — update cache.
+  uint16_t granted, ttl_ms, base_cpu, num_cpus;
   uint32_t epoch;
-  std::memcpy(&granted, ts.rep_buf + 0, 2);
-  std::memcpy(&ttl_ms,  ts.rep_buf + 2, 2);
-  std::memcpy(&epoch,   ts.rep_buf + 4, 4);
+  std::memcpy(&granted,  ts.rep_buf + 0,  2);
+  std::memcpy(&ttl_ms,   ts.rep_buf + 2,  2);
+  std::memcpy(&epoch,    ts.rep_buf + 4,  4);
+  std::memcpy(&base_cpu, ts.rep_buf + 8,  2);
+  std::memcpy(&num_cpus, ts.rep_buf + 10, 2);
   (void)epoch;
 
-  ts.cached_threads = granted > 0 ? static_cast<int>(granted) : 1;
+  ts.cached_threads  = granted > 0 ? static_cast<int>(granted) : 1;
+  ts.cached_base_cpu = base_cpu;
+  ts.cached_num_cpus = num_cpus;
   if (ttl_ms == 0) ttl_ms = 5;
   ts.cache_until_ns = now_ns() + uint64_t(ttl_ms) * 1'000'000ull;
   ts.pending_reply = false;
   ts.rep_read = 0;
+
+  // Apply CPU affinity immediately so that OpenMP threads forked in the
+  // upcoming parallel region inherit the DRM-assigned CPU set.
+  apply_cpu_affinity(base_cpu, num_cpus);
+
   return true;
 }
 
@@ -174,18 +209,6 @@ int rm_get_granted_threads(int fallback, int max_threads) {
 
 
 extern int __kmp_determine_teamsize() {
-  /* static int value;
-  static int initialized = 0;
-  KA_TRACE(10, ("__kmp_determine_teamsize: called\n"));
-  if (!initialized) {
-    srand(time(NULL));
-    initialized = 1;
-  }
-
-  // zufällige Teamgröße zwischen 1 und 8
-  value = (rand() % 16) + 1;
-  KA_TRACE(10, ("__kmp_determine_teamsize: returning %d\n", value));
-  return value; */
   KA_TRACE(10, ("__kmp_determine_teamsize: called\n"));
   int dflt = __kmp_dflt_team_nth > 0 ? __kmp_dflt_team_nth : __kmp_avail_proc;
   int max  = __kmp_max_nth > 0 ? __kmp_max_nth : dflt;
