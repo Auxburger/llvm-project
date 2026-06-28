@@ -12,6 +12,11 @@
 
 #include "kmp_wait_release.h"
 #include "kmp_barrier.h"
+
+// Forward declaration: defined in kmp_resource_manager.cpp.
+// Applies the DRM-assigned CPU affinity to the calling (worker) thread so the
+// entire OpenMP team is confined to the process's DRM-granted CPU slice.
+extern "C" void __kmp_drm_apply_affinity();
 #include "kmp_itt.h"
 #include "kmp_os.h"
 #include "kmp_stats.h"
@@ -2643,6 +2648,13 @@ void __kmp_fork_barrier(int gtid, int tid) {
     }
   }
 #endif // KMP_AFFINITY_SUPPORTED
+
+  // Apply DRM-assigned CPU affinity on worker threads so the full team is
+  // confined to the slice the DRM granted to this process, not just the master.
+  if (!KMP_MASTER_TID(tid)) {
+    __kmp_drm_apply_affinity();
+  }
+
   // Perform the display affinity functionality
   if (__kmp_display_affinity) {
     if (team->t.t_display_affinity

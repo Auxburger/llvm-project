@@ -2,6 +2,7 @@
 #include <time.h>
 #include "kmp.h"
 #include "kmp_debug.h"
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -12,6 +13,13 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/syscall.h>
+
+// Global DRM CPU assignment — written by the master thread when a DRM reply
+// arrives, read by every worker thread at the fork barrier so that the entire
+// OpenMP team is confined to the DRM-assigned CPU slice.
+static std::atomic<uint16_t> g_drm_base_cpu{0};
+static std::atomic<uint16_t> g_drm_num_cpus{0};
 
 namespace {
 
@@ -144,8 +152,12 @@ bool try_drain_reply() {
   ts.pending_reply = false;
   ts.rep_read = 0;
 
-  // Apply CPU affinity immediately so that OpenMP threads forked in the
-  // upcoming parallel region inherit the DRM-assigned CPU set.
+  // Publish the CPU assignment globally so worker threads can read it at the
+  // fork barrier and pin themselves to the same slice as the master.
+  g_drm_base_cpu.store(base_cpu, std::memory_order_release);
+  g_drm_num_cpus.store(num_cpus, std::memory_order_release);
+
+  // Apply CPU affinity on the master thread immediately.
   apply_cpu_affinity(base_cpu, num_cpus);
 
   return true;
@@ -207,6 +219,28 @@ int rm_get_granted_threads(int fallback, int max_threads) {
 }
 
 
+
+// Called by every worker thread at the fork barrier (kmp_barrier.cpp) so that
+// the full OpenMP team is confined to the DRM-assigned CPU slice, not just the
+// master.  Each worker caches the last applied assignment and only issues a
+// sched_setaffinity syscall when the DRM assignment actually changes — this
+// avoids syscall overhead on every parallel region entry.
+extern "C" void __kmp_drm_apply_affinity() {
+  uint16_t base = g_drm_base_cpu.load(std::memory_order_acquire);
+  uint16_t num  = g_drm_num_cpus.load(std::memory_order_acquire);
+  // Thread-local cache: skip syscall if assignment unchanged.
+  static thread_local uint16_t last_base = UINT16_MAX;
+  static thread_local uint16_t last_num  = UINT16_MAX;
+  if (base == last_base && num == last_num)
+    return;
+  last_base = base;
+  last_num  = num;
+  apply_cpu_affinity(base, num);
+  fprintf(stderr, "[DRM-pin] pid=%d tid=%ld assigned=%d-%d running_on=%d\n",
+          getpid(), syscall(SYS_gettid),
+          (int)base, (int)(base + num - 1),
+          sched_getcpu());
+}
 
 extern int __kmp_determine_teamsize() {
   KA_TRACE(10, ("__kmp_determine_teamsize: called\n"));
