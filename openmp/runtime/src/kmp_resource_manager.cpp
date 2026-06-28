@@ -228,6 +228,10 @@ int rm_get_granted_threads(int fallback, int max_threads) {
 extern "C" void __kmp_drm_apply_affinity() {
   uint16_t base = g_drm_base_cpu.load(std::memory_order_acquire);
   uint16_t num  = g_drm_num_cpus.load(std::memory_order_acquire);
+  // No real assignment yet (DRM reply not arrived or pool exhausted → 0+0).
+  // Skip without caching so the real assignment takes effect when it arrives.
+  if (num == 0)
+    return;
   // Thread-local cache: skip syscall if assignment unchanged.
   static thread_local uint16_t last_base = UINT16_MAX;
   static thread_local uint16_t last_num  = UINT16_MAX;
